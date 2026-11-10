@@ -1,6 +1,6 @@
 # demo-telco
 
-API de una telco **de práctica** para demostrar [Orbitta](https://orbitta.blautech.cloud): verificación de
+API de una telco **de práctica** para demostrar Orbitta: verificación de
 número por OTP y portabilidad numérica entre operadores, con datos de Guatemala (+502). Sin dependencias
 y en memoria; no es un sistema real.
 
