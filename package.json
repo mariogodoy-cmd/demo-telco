@@ -1,0 +1,13 @@
+{
+  "name": "demo-telco",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API de una telco de práctica (verificación de número por OTP y portabilidad numérica) para demostrar Orbitta.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

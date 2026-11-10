@@ -1,0 +1,82 @@
+name: Orbitta · calidad del PR
+
+# Corre en el runner self-hosted (la máquina donde está Orbitta): levanta la API con el
+# código del PR, le avisa a Orbitta qué cambió y espera la puerta de liberación.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  orbitta:
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 30
+    env:
+      ORBITTA_URL: http://localhost:3100
+      # Pipeline «CI · telco-core (PR)» en Orbitta (no es un secreto).
+      ORBITTA_PIPELINE_ID: d6d51781-50fa-4101-a674-471f0b9984b9
+      PORT: '4010'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Levantar la API con el código del PR
+        shell: powershell
+        run: |
+          # Lo que estuviera escuchando en el puerto (otra versión) se detiene primero.
+          Get-NetTCPConnection -LocalPort $env:PORT -State Listen -ErrorAction SilentlyContinue |
+            ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+          Start-Process node -ArgumentList 'src/server.mjs' -WindowStyle Hidden
+          for ($i = 0; $i -lt 30; $i++) {
+            try { Invoke-RestMethod "http://localhost:$env:PORT/health" | Out-Null; Write-Host "API del PR en http://localhost:$env:PORT"; exit 0 }
+            catch { Start-Sleep -Seconds 1 }
+          }
+          throw 'La API no arrancó'
+
+      - name: Avisar a Orbitta y esperar la puerta de liberación
+        shell: powershell
+        env:
+          ORBITTA_TOKEN: ${{ secrets.ORBITTA_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if (-not $env:ORBITTA_TOKEN) { throw 'Falta el secreto ORBITTA_TOKEN (Settings → Secrets and variables → Actions)' }
+          $files = @(git diff --name-only "origin/$($env:BASE_REF)...HEAD" | Where-Object { $_ })
+          Write-Host "Archivos del PR: $($files -join ', ')"
+          $body = @{
+            repoUrl  = $env:REPO_URL
+            prNumber = if ($env:PR_NUMBER) { [int]$env:PR_NUMBER } else { $null }
+            ref      = $env:GITHUB_REF
+            baseBranch = $env:BASE_REF
+            sha      = $env:HEAD_SHA
+            actor    = $env:ACTOR
+            title    = $env:PR_TITLE
+            files    = $files
+          } | ConvertTo-Json -Depth 4
+          $headers = @{ Authorization = "Bearer $env:ORBITTA_TOKEN" }
+          $run = Invoke-RestMethod -Method Post -Uri "$env:ORBITTA_URL/api/v1/ci/pipelines/$env:ORBITTA_PIPELINE_ID/run" `
+            -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+          Write-Host "Orbitta: $($run.reportUrl)"
+
+          $deadline = (Get-Date).AddMinutes(20)
+          do {
+            Start-Sleep -Seconds 3
+            $st = Invoke-RestMethod -Uri "$env:ORBITTA_URL/api/v1/ci/pipelines/runs/$($run.runId)" -Headers $headers
+          } while ($null -eq $st.passed -and (Get-Date) -lt $deadline)
+
+          $gate = $st.releaseGate
+          if ($gate) {
+            Write-Host ""
+            Write-Host "Puerta de liberación: $($gate.state) · preparación $($gate.readiness)% · confianza $($gate.confidence)%"
+            foreach ($r in $gate.reasons) { Write-Host "  · $r" }
+          }
+          if ($st.passed -ne $true) {
+            Write-Host "::error::Orbitta bloquea el PR: la puerta de liberación no está lista."
+            exit 1
+          }
+          Write-Host "Orbitta: se puede desplegar."
